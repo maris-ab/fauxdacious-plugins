@@ -115,6 +115,7 @@ enum fileext_t
 #ifdef FILEWRITER_FLAC
     FLAC,
 #endif
+    DSF,
     FILEEXT_MAX
 };
 
@@ -128,8 +129,9 @@ static const char *fileext_str[FILEEXT_MAX] =
     ".ogg",
 #endif
 #ifdef FILEWRITER_FLAC
-    ".flac"
+    ".flac",
 #endif
+    ".dsf"
 };
 
 static FileWriterImpl *plugin;
@@ -146,6 +148,7 @@ FileWriterImpl *plugins[FILEEXT_MAX] = {
 #ifdef FILEWRITER_FLAC
     &flac_plugin,
 #endif
+    &dsf_plugin,
 };
 
 const char * const FileWriter::defaults[] = {
@@ -505,6 +508,7 @@ static const ComboItem plugin_combo[] = {
 #ifdef FILEWRITER_FLAC
     ,ComboItem ("FLAC", FLAC)
 #endif
+    ,ComboItem ("DSF", DSF)
 };
 
 static const PreferencesWidget main_widgets[] = {

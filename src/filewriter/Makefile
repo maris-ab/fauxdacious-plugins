@@ -5,6 +5,7 @@ SRCS = filewriter.cc	\
        mp3.cc		\
        vorbis.cc		\
        flac.cc           \
+       dsf.cc           \
        convert.cc
 
 include ../../buildsys.mk

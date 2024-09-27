@@ -128,8 +128,8 @@ public:
     bool read_tag (const char * filename, VFSFile & file, Tuple & tuple, Index<char> * image);
     bool write_tuple (const char * filename, VFSFile & file, const Tuple & tuple);
     void write_audioframe (CodecInfo * cinfo, AVPacket * pkt, int out_fmt, bool planar);
-    void write_videoframe (SDL_Renderer * renderer, CodecInfo * vcinfo, 
-            SDL_Texture * bmp, AVPacket *pkt, int video_width, 
+    void write_videoframe (SDL_Renderer * renderer, CodecInfo * vcinfo,
+            SDL_Texture * bmp, AVPacket *pkt, int video_width,
             int video_height, bool last_resized, bool * windowIsStable);
     bool play (const char * filename, VFSFile & file);
 };
@@ -144,13 +144,14 @@ const char * const FFaudio::defaults[] = {
     "video_xmove", "1",     // RESTORE WINDOW TO PREV. SAVED POSITION.
     "video_ysize", "-1",    // ADJUST WINDOW WIDTH TO MATCH PREV. SAVED HEIGHT.
     "save_video", "FALSE",  // DUB VIDEO AS BEING PLAYED.
-    "reader_sleep_ms", "50", // TIME FOR READER THREAD TO SLEEP IN MILLISEC TO ALLOW QUEUES TO DRAIN.
+    "reader_sleep_ms", "90", // TIME FOR READER THREAD TO SLEEP IN MILLISEC TO ALLOW QUEUES TO DRAIN.
     "noresize_optimizations", "FALSE", // SOME WMs (LIKE jwm) REQUIRE THIS TO BE TRUE FOR VIDEO WINDOW TO BE RESIZABLE.
 #ifdef _WIN32
     "save_video_file", "C:\\Temp\\lastvideo",
 #else
     "save_video_file", "/tmp/lastvideo",
 #endif
+    "enable_dsd", "FALSE",
     nullptr
 };
 
@@ -174,6 +175,8 @@ const PreferencesWidget FFaudio::widgets[] = {
         WidgetInt ("ffaudio", "reader_sleep_ms"), {1, 500, 1}),
     WidgetCheck (N_("Unoptimized vid. window resize (some WMs, ie. JWM may need)."),  // WE HAVE ffmpeg COMPILED W/--enable-gray IN WINDOWS!
         WidgetBool ("ffaudio", "noresize_optimizations")),
+    WidgetCheck (N_("Enable DSD stream output"),
+        WidgetBool("ffaudio", "enable_dsd")),
 };
 
 const PluginPreferences FFaudio::prefs = {{widgets}};
@@ -200,17 +203,17 @@ struct ScopedFrame
 #endif
 };
 
-/* 
-    JWT: ADDED ALL THIS QUEUE STUFF TO SMOOTH VIDEO PERFORMANCE SO THAT VIDEO FRAMES WOULD 
-    BE OUTPUT MORE INTERLACED WITH THE AUDIO FRAMES BY QUEUEING VIDEO FRAMES UNTIL AN 
-    AUDIO FRAME IS PROCESSED, THEN DEQUEUEING AND PROCESSING 'EM WITH EACH AUDIO FRAME.  
+/*
+    JWT: ADDED ALL THIS QUEUE STUFF TO SMOOTH VIDEO PERFORMANCE SO THAT VIDEO FRAMES WOULD
+    BE OUTPUT MORE INTERLACED WITH THE AUDIO FRAMES BY QUEUEING VIDEO FRAMES UNTIL AN
+    AUDIO FRAME IS PROCESSED, THEN DEQUEUEING AND PROCESSING 'EM WITH EACH AUDIO FRAME.
     THE SIZE OF THIS QUEUE IS SET BY video_qsize CONFIG PARAMETER AND DEFAULTS TO 6.
-    HAVING TOO MANY CAN RESULT IN DELAYED VIDEO, SO EXPERIMENT.  IDEALLY, PACKETS SHOULD 
-    BE PROCESSED:  V A V A V A..., BUT THIS HANDLES:  
-    V1 V2 V3 V4 V5 A1 A2 A3 A4 A5 A6 A7 V7 A8... AS: 
+    HAVING TOO MANY CAN RESULT IN DELAYED VIDEO, SO EXPERIMENT.  IDEALLY, PACKETS SHOULD
+    BE PROCESSED:  V A V A V A..., BUT THIS HANDLES:
+    V1 V2 V3 V4 V5 A1 A2 A3 A4 A5 A6 A7 V7 A8... AS:
     (q:V1 V2 V3 V4 V5 V6) A1 A2 dq:V1 A3 A4 dq:V2 A5 A6 dq:V3 A7 A8...
     WE DON'T WANT TO INTERRUPT AUDIO PERFORMANCE AND I DON'T KNOW HOW TO THREAD IT UP,
-    BUT THIS SIMPLE APPROACH SEEMS TO WORK PRETTY SMOOTH FOR ME!  OTHERWISE TRY 
+    BUT THIS SIMPLE APPROACH SEEMS TO WORK PRETTY SMOOTH FOR ME!  OTHERWISE TRY
     INCREASING video_qsize IN config file OTHERWISE.
     BORROWED THESE FUNCTIONS FROM:
     http://www.thelearningpoint.net/computer-science/data-structures-queues--with-c-program-source-code
@@ -302,6 +305,47 @@ void destroyQueue (pktQueue * Q)
     Q = nullptr;
 }
 
+// DSD Processing
+// Check DSD stream
+bool is_codec_dsd(enum AVCodecID codec_id) {
+    switch(codec_id) {
+        case AV_CODEC_ID_DSD_LSBF:
+        case AV_CODEC_ID_DSD_LSBF_PLANAR:
+        case AV_CODEC_ID_DSD_MSBF:
+        case AV_CODEC_ID_DSD_MSBF_PLANAR:
+//        case AV_CODEC_ID_DST:
+            return true;
+        break;
+    default:
+        return false;
+    }
+}
+
+// Sony DSF format
+// Bit reverse DSF LSB Least Significant Bit first
+static const unsigned char reverse_tab[16] = {
+  0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe,
+  0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf};
+
+// Interlace DSF by channels
+void dsf_interlace_loop(uint8_t * in, uint8_t * out, bool is_lsb_first, int channels, int frames)
+{
+    uint8_t *get = in;
+    for (int ch = 0; ch < channels; ch++)
+    {
+        const uint8_t *end = get + frames;
+        uint8_t *set = out + ch;
+        while (get < end)
+        {
+            uint8_t val = *(get++);
+            if (is_lsb_first) // Bit reverse DSD LSB Least Significant Bit first
+                val = ((reverse_tab[val & 0b1111] << 4) | reverse_tab[val >> 4]);
+            *set = val;
+            set += channels;
+        }
+    }
+}
+
 /* JWT:END OF ADDED VIDEO PACKET QUEUEING FUNCTIONS */
 
 static SimpleHash<String, AVInputFormat *> extension_dict;
@@ -368,7 +412,7 @@ static void ffaudio_log_cb (void * avcl, int av_level, const char * fmt, va_list
 bool FFaudio::init ()
 {
     AUDINFO ("Starting up FFaudio.\n");
-    
+
     aud_config_set_defaults ("ffaudio", defaults);
 
     if (! initted)
@@ -809,20 +853,41 @@ static bool convert_format (int ff_fmt, int & aud_fmt, bool & planar)
 
 void FFaudio::write_audioframe (CodecInfo * cinfo, AVPacket * pkt, int out_fmt, bool planar)
 {
-    int size = 0;
+#if CHECK_LIBAVCODEC_VERSION(59, 37, 100, 59, 37, 100)
+    int channels = cinfo->context->ch_layout.nb_channels;
+#else
+    int channels = cinfo->context->channels;
+#endif
     Index<char> buf;
+
+    // DSD Processing
+    if (is_codec_dsd(cinfo->context->codec_id) && aud_get_bool("ffaudio", "enable_dsd"))
+    {
+        // Process Sony DSF format
+        if ( cinfo->context->codec_id == AV_CODEC_ID_DSD_LSBF
+            || cinfo->context->codec_id == AV_CODEC_ID_DSD_LSBF_PLANAR)
+        {
+            buf.resize(pkt->size);
+            // Bit reverse DSD LSB Least Significant Bit first
+            dsf_interlace_loop(pkt->data, (uint8_t *)buf.begin(),
+                cinfo->context->codec_id == AV_CODEC_ID_DSD_LSBF_PLANAR, channels, (pkt->size)/channels);
+            write_audio (buf.begin(), pkt->size);
+            return;
+        }
+        else
+        {   // Process Philips DSDIFF format
+            write_audio (pkt->data, pkt->size);
+            return;
+        }
+    }   // End of DSD
+
+    int size = 0;
 #ifdef SEND_PACKET
     if (LOG (avcodec_send_packet, cinfo->context, pkt) < 0)
         return;
 #else
     int decoded = 0;
     int len = 0;
-#endif
-
-#if CHECK_LIBAVCODEC_VERSION(59, 37, 100, 59, 37, 100)
-    int channels = cinfo->context->ch_layout.nb_channels;
-#else
-    int channels = cinfo->context->channels;
 #endif
 
     while (pkt->size > 0)
@@ -869,8 +934,8 @@ void FFaudio::write_audioframe (CodecInfo * cinfo, AVPacket * pkt, int out_fmt, 
 }
 
 /* JWT: NEW FUNCTION TO WRITE VIDEO FRAMES TO THE POPUP WINDOW: */
-void FFaudio::write_videoframe (SDL_Renderer * renderer, CodecInfo * vcinfo, 
-    SDL_Texture * bmp, AVPacket *pkt, int video_width, 
+void FFaudio::write_videoframe (SDL_Renderer * renderer, CodecInfo * vcinfo,
+    SDL_Texture * bmp, AVPacket *pkt, int video_width,
     int video_height, bool last_resized, bool * windowIsStable)
 {
 #ifdef SEND_PACKET
@@ -902,7 +967,7 @@ void FFaudio::write_videoframe (SDL_Renderer * renderer, CodecInfo * vcinfo,
             if (last_resized)  /* BLIT THE FRAME, BUT ONLY IF WE'RE NOT CURRENTLY RESIZING THE WINDOW! */
             {
                 //SDL_RenderClear (renderer);
-                SDL_UpdateYUVTexture (bmp, nullptr, vframe->data[0], vframe->linesize[0], 
+                SDL_UpdateYUVTexture (bmp, nullptr, vframe->data[0], vframe->linesize[0],
                     vframe->data[1], vframe->linesize[1], vframe->data[2], vframe->linesize[2]);
                 SDL_RenderCopy (renderer, bmp, nullptr, nullptr);  // USE NULL TO GET IMAGE TO FIT WINDOW!
                 SDL_RenderPresent (renderer);  // JWT:NOTE, WILL SEGFAULT HERE IF SQL IS ALREADY SHUT DOWN!
@@ -1180,7 +1245,7 @@ bool FFaudio::play (const char * filename, VFSFile & file)
     as_decor_fudge_y = 0;
 #endif
 
-/* STUFF THAT GETS FREED MUST BE DECLARED AND INITIALIZED AFTER HERE B/C BEFORE HERE, WE RETURN, 
+/* STUFF THAT GETS FREED MUST BE DECLARED AND INITIALIZED AFTER HERE B/C BEFORE HERE, WE RETURN,
    AFTER HERE, WE GO TO error_exit (AND FREE STUFF)! */
 
     AVPacket * pkt;
@@ -1193,7 +1258,7 @@ bool FFaudio::play (const char * filename, VFSFile & file)
     if (play_video)
         vcodec_opened = true;
 
-    /* JWT:WE CAN NOT RE-OPEN stdin or youtube-dl PIPED STREAMS (THEY CAN ONLY BE OPENED ONE TIME, SO WE 
+    /* JWT:WE CAN NOT RE-OPEN stdin or youtube-dl PIPED STREAMS (THEY CAN ONLY BE OPENED ONE TIME, SO WE
        DON'T OPEN THOSE UNTIL HERE - WE'RE READY TO PLAY)! */
     if (! strncmp (filename, "stdin://", 8))  /* JWT: FOR STDIN: TRY AGAIN TO GET "read_tag()" STUFF NOW (NEEDED TO SHOW LENGTH W/O SLIDER)! */
     {
@@ -1277,7 +1342,7 @@ bool FFaudio::play (const char * filename, VFSFile & file)
             THE NEW WINDOW WILL KEEP THE SAME VALUE FOR THAT DIMENSION AS THE PREV. WINDOW,
             AND ADJUST THE OTHER DIMENTION ACCORDINGLY TO FIT THE NEW VIDEO'S ASPECT RATIO.
             IF BOTH ARE SPECIFIED AS "-1", USE PREVIOUSLY-SAVED WINDOW SIZE REGUARDLESS OF ASPECT RATIO.
-        */        
+        */
         video_aspect_ratio = TD.vcinfo.context->height
             ? (float) TD.vcinfo.context->width / (float) TD.vcinfo.context->height : 1.0;
         vx = aud_get_int ("ffaudio", "video_xsize");
@@ -1351,12 +1416,21 @@ breakout1:
     AUDDBG ("opening audio output - bitrate=%ld=\n", (long) TD.ic->bit_rate);
 
     set_stream_bitrate (TD.ic->bit_rate);
+    {
 #if CHECK_LIBAVCODEC_VERSION(59, 37, 100, 59, 37, 100)
-    open_audio (out_fmt, TD.cinfo.context->sample_rate, TD.cinfo.context->ch_layout.nb_channels);
+        int channels = TD.cinfo.context->ch_layout.nb_channels;
 #else
-    open_audio (out_fmt, TD.cinfo.context->sample_rate, TD.cinfo.context->channels);
+        int channels = TD.cinfo.context->channels;
 #endif
+        int sample_rate = TD.cinfo.context->sample_rate;
+        if (is_codec_dsd(TD.cinfo.context->codec_id) && aud_get_bool("ffaudio", "enable_dsd"))
+        {
+            out_fmt = FMT_DSD_MSB8;
+            sample_rate /= 4; // Convert to ALSA sample rate
+        }
 
+        open_audio (out_fmt, sample_rate, channels);
+    }
     int seek_value;
     /* JWT:video_qsize:  MAX # PACKETS TO QUEUE UP FOR INTERLACING TO SMOOTH VIDEO
         PLAYBACK - GOOD RANGE IS 6-12, DEFAULT IS 6:
@@ -1440,7 +1514,7 @@ breakout1:
         str_replace_char (titleBuf, '_', ' ');
 
         SDL_SetWindowTitle (sdl_window, (const char *) titleBuf);
-	}
+    }
 
     /* LOOP TO PROCESS QUEUED AUDIO & VIDEO PACKETS FROM THE STREAM, INTERLACE AND OUTPUT THEM: */
     while (! thread_exit)
@@ -1898,6 +1972,9 @@ const char * const FFaudio::exts[] = {
 
     /* WAV (there are some WAV formats sndfile can't handle) */
     "wav",
+
+    // Wavpack compressed DSD
+    "wv",
 
     /* Handle OGG streams (FLAC/Vorbis etc.) */
     "ogg", "oga", "ogv", "ogx",

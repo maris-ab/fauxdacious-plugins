@@ -111,12 +111,6 @@ check_allowed () {
             if test $plugin_allowed = no -a $2 = yes ; then
                 AC_MSG_ERROR([--enable-$1 cannot be used without --enable-qt])
             fi
-            if test $plugin_allowed = yes -a $1 = qtaudio ; then
-                plugin_allowed=$USE_QT5
-                if test $plugin_allowed = no -a $2 = yes ; then
-                    AC_MSG_ERROR([--enable-$1 cannot be used without --enable-qt5])
-                fi
-            fi
             if test $plugin_allowed = yes -a $1 = ampache ; then
                 plugin_allowed=$have_neon
                 if test $plugin_allowed = no -a $2 = yes ; then
@@ -383,6 +377,13 @@ ENABLE_PLUGIN_WITH_TEST(oss4,
     OSS output,
     auto,
     OUTPUT)
+
+ENABLE_PLUGIN_WITH_DEP(pipewire,
+    PipeWire output,
+    auto,
+    OUTPUT,
+    PIPEWIRE,
+    libpipewire-0.3 >= 0.3.26 libspa-0.2 >= 0.2)
 
 ENABLE_PLUGIN_WITH_DEP(pulse,
     PulseAudio output,
@@ -881,7 +882,7 @@ echo "  -------"
 echo "  Advanced Linux Sound Architecture:      $have_alsa"
 echo "  Jack Audio Connection Kit:              $have_jack"
 echo "  Open Sound System:                      $have_oss4"
-echo "  PipeWire:                               -use PulseAudio plugin!-"
+echo "  PipeWire:                               $have_pipewire"
 echo "  PulseAudio:                             $have_pulse"
 echo "  Simple DirectMedia Layer (SDL2):        $have_sdlout"
 echo "  Sndio:                                  $have_sndio"
@@ -941,7 +942,7 @@ fi
 if test "x$USE_QT" = "xyes" ; then
     echo "  Qt Support"
     echo "  ----------"
-    echo "  Qt Multimedia output (Qt 5 only):       $have_qtaudio"
+    echo "  Qt Multimedia output:                   $have_qtaudio"
     echo "  Qt Interface (release#)                 $QT_VSN"
     echo "  Winamp Classic Interface:               yes"
     echo "  Album Art:                              yes"
